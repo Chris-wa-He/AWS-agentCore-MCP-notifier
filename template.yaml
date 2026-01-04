@@ -1,0 +1,244 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: AgentCore Feishu Notifier - A notification tool deployed on AWS AgentCore Gateway
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment
+  
+  GatewayName:
+    Type: String
+    Default: feishu-notifier-gateway
+    Description: Name for the AgentCore Gateway
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 128
+    Runtime: python3.11
+
+Resources:
+  # ============================================
+  # Cognito Resources for M2M Authentication
+  # ============================================
+  
+  # Cognito User Pool
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${GatewayName}-user-pool-${Environment}
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+
+  # Cognito Resource Server (defines OAuth scopes)
+  CognitoResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      Identifier: !Sub ${GatewayName}-resource-server
+      Name: FeishuNotifierResourceServer
+      Scopes:
+        - ScopeName: invoke
+          ScopeDescription: Invoke Feishu notification tools
+
+  # Cognito User Pool Client (M2M client credentials)
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: CognitoResourceServer
+    Properties:
+      ClientName: !Sub ${GatewayName}-client-${Environment}
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: true
+      AllowedOAuthFlows:
+        - client_credentials
+      AllowedOAuthScopes:
+        - !Sub ${GatewayName}-resource-server/invoke
+      AllowedOAuthFlowsUserPoolClient: true
+      SupportedIdentityProviders:
+        - COGNITO
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  # Cognito User Pool Domain
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub ${GatewayName}-${AWS::AccountId}-${Environment}
+      UserPoolId: !Ref CognitoUserPool
+
+
+  # ============================================
+  # Lambda Function
+  # ============================================
+  
+  # Lambda Function for Feishu Notification
+  FeishuNotifierFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub feishu-notifier-${Environment}
+      CodeUri: src/
+      Handler: feishu_notifier.handler.lambda_handler
+      Description: Feishu notification Lambda function for AgentCore Gateway
+      Tags:
+        Environment: !Ref Environment
+        Project: agentcore-feishu-notifier
+
+  # Lambda Permission for AgentCore Gateway
+  FeishuNotifierFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt FeishuNotifierFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceArn: !Sub arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*
+
+
+  # ============================================
+  # AgentCore Gateway Resources
+  # ============================================
+  
+  # IAM Role for AgentCore Gateway
+  AgentCoreGatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${GatewayName}-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt FeishuNotifierFunction.Arn
+
+  # AgentCore Gateway
+  AgentCoreGateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub ${GatewayName}-${Environment}
+      Description: AgentCore Gateway for Feishu notification tools
+      ProtocolType: MCP
+      AuthorizerType: CUSTOM_JWT
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}/.well-known/openid-configuration
+          AllowedClients:
+            - !Ref CognitoUserPoolClient
+      RoleArn: !GetAtt AgentCoreGatewayRole.Arn
+      Tags:
+        Environment: !Ref Environment
+        Project: agentcore-feishu-notifier
+
+  # AgentCore Gateway Target (Lambda with Tool Schema)
+  AgentCoreGatewayTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    DependsOn: AgentCoreGateway
+    Properties:
+      GatewayIdentifier: !GetAtt AgentCoreGateway.GatewayIdentifier
+      Name: feishu-notifier-target
+      Description: Feishu notification tool target
+      TargetConfiguration:
+        Mcp:
+          Lambda:
+            LambdaArn: !GetAtt FeishuNotifierFunction.Arn
+            ToolSchema:
+              InlinePayload:
+                - Name: send_feishu_notification
+                  Description: Send a notification message to a Feishu (Lark) group via webhook. Supports both plain text and rich text (post) message formats.
+                  InputSchema:
+                    Type: object
+                    Properties:
+                      webhook_url:
+                        Type: string
+                        Description: The Feishu webhook URL for the target group. Must start with https://
+                      message:
+                        Type: string
+                        Description: The notification message content to send
+                      msg_type:
+                        Type: string
+                        Description: "Message type: 'text' for plain text (default), 'post' for rich text with title"
+                      title:
+                        Type: string
+                        Description: Title for rich text (post) messages. Required when msg_type is 'post'
+                    Required:
+                      - webhook_url
+                      - message
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+
+
+# ============================================
+# Outputs
+# ============================================
+Outputs:
+  # Lambda Function
+  FeishuNotifierFunctionArn:
+    Description: Feishu Notifier Lambda Function ARN
+    Value: !GetAtt FeishuNotifierFunction.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-LambdaArn
+
+  # AgentCore Gateway
+  GatewayId:
+    Description: AgentCore Gateway ID
+    Value: !GetAtt AgentCoreGateway.GatewayIdentifier
+    Export:
+      Name: !Sub ${AWS::StackName}-GatewayId
+
+  GatewayUrl:
+    Description: AgentCore Gateway MCP Endpoint URL
+    Value: !GetAtt AgentCoreGateway.GatewayUrl
+    Export:
+      Name: !Sub ${AWS::StackName}-GatewayUrl
+
+  GatewayArn:
+    Description: AgentCore Gateway ARN
+    Value: !GetAtt AgentCoreGateway.GatewayArn
+    Export:
+      Name: !Sub ${AWS::StackName}-GatewayArn
+
+  # Cognito Authentication
+  CognitoUserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref CognitoUserPool
+    Export:
+      Name: !Sub ${AWS::StackName}-UserPoolId
+
+  CognitoClientId:
+    Description: Cognito User Pool Client ID (use this for OAuth client_id)
+    Value: !Ref CognitoUserPoolClient
+    Export:
+      Name: !Sub ${AWS::StackName}-ClientId
+
+  CognitoTokenEndpoint:
+    Description: Cognito Token Endpoint URL (use this to get access tokens)
+    Value: !Sub https://${GatewayName}-${AWS::AccountId}-${Environment}.auth.${AWS::Region}.amazoncognito.com/oauth2/token
+    Export:
+      Name: !Sub ${AWS::StackName}-TokenEndpoint
+
+  CognitoDiscoveryUrl:
+    Description: Cognito OpenID Connect Discovery URL
+    Value: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}/.well-known/openid-configuration
+    Export:
+      Name: !Sub ${AWS::StackName}-DiscoveryUrl

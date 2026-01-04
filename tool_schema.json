@@ -1,0 +1,45 @@
+[
+    {
+        "name": "send_feishu_notification",
+        "description": "Send a notification message to a Feishu (Lark) group via webhook. Supports both plain text and rich text (post) message formats. Use this tool to alert team members about important events, system notifications, or any information that needs to be communicated to a Feishu group.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "webhook_url": {
+                    "type": "string",
+                    "description": "The Feishu webhook URL for the target group. Must start with https://. You can get this URL from Feishu group settings by adding a custom bot."
+                },
+                "message": {
+                    "type": "string",
+                    "description": "The notification message content to send. For text type, this is the plain text message. For post type, this is the body content of the rich text message."
+                },
+                "msg_type": {
+                    "type": "string",
+                    "description": "Message type: 'text' for plain text messages (default), 'post' for rich text messages with title and formatting support."
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Title for rich text (post) messages. Required when msg_type is 'post'. Ignored for 'text' messages."
+                }
+            },
+            "required": ["webhook_url", "message"]
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "success": {
+                    "type": "boolean",
+                    "description": "Whether the notification was sent successfully"
+                },
+                "data": {
+                    "type": "object",
+                    "description": "Response data when successful, contains status and message"
+                },
+                "error": {
+                    "type": "object",
+                    "description": "Error details when failed, contains code and message"
+                }
+            }
+        }
+    }
+]
