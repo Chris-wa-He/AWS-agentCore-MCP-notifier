@@ -293,6 +293,148 @@ uv run ruff check src/
 - Backoff strategy: Exponential backoff (1s → 2s → 4s)
 - Timeout configuration: Connection 5s, Read 10s
 
+## Manual Testing (10 minutes)
+
+After deployment, follow these steps to verify the Gateway is working correctly.
+
+### Step 1: Get Deployment Outputs
+
+After successful deployment, retrieve the following information from CloudFormation outputs:
+
+```bash
+# View Stack outputs
+aws cloudformation describe-stacks \
+  --stack-name agentcore-feishu-notifier \
+  --query 'Stacks[0].Outputs' \
+  --output table
+```
+
+Note down the following values:
+- `GatewayUrl` - Gateway MCP endpoint
+- `CognitoClientId` - OAuth Client ID
+- `CognitoTokenEndpoint` - Token endpoint
+
+### Step 2: Get Cognito Client Secret
+
+Get the Client Secret from AWS Console:
+1. Go to Cognito → User Pools
+2. Select `feishu-notifier-gateway-user-pool-dev`
+3. App Integration → App clients
+4. Click Client → Show Client Secret
+
+### Step 3: Get Access Token
+
+Run in terminal (replace with actual values):
+
+```bash
+# Set variables
+CLIENT_ID="your-client-id"
+CLIENT_SECRET="your-client-secret"
+TOKEN_ENDPOINT="https://feishu-notifier-gateway-123456789012-dev.auth.us-east-1.amazoncognito.com/oauth2/token"
+SCOPE="feishu-notifier-gateway-resource-server/invoke"
+
+# Get Token
+curl -X POST "$TOKEN_ENDPOINT" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=$CLIENT_ID" \
+  -d "client_secret=$CLIENT_SECRET" \
+  -d "scope=$SCOPE"
+```
+
+Copy the returned `access_token`.
+
+### Step 4: Test Gateway - List Tools
+
+```bash
+GATEWAY_URL="https://gw-xxx.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
+ACCESS_TOKEN="your-access-token"
+
+curl -X POST "$GATEWAY_URL" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/list",
+    "params": {}
+  }'
+```
+
+Expected response should contain the `send_feishu_notification` tool.
+
+### Step 5: Test Gateway - Call Tool
+
+```bash
+# Replace with your Feishu Webhook URL
+WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/your-webhook-id"
+
+curl -X POST "$GATEWAY_URL" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "tools/call",
+    "params": {
+      "name": "feishu-notifier-target___send_feishu_notification",
+      "arguments": {
+        "webhook_url": "'"$WEBHOOK_URL"'",
+        "message": "Hello from AgentCore Gateway! 🎉",
+        "msg_type": "text"
+      }
+    }
+  }'
+```
+
+Expected response:
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "success": true,
+    "data": {
+      "status": "sent",
+      "message": "Notification sent successfully"
+    }
+  }
+}
+```
+
+Your Feishu group should also receive the test message.
+
+### Step 6: Test Rich Text Message (Optional)
+
+```bash
+curl -X POST "$GATEWAY_URL" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "tools/call",
+    "params": {
+      "name": "feishu-notifier-target___send_feishu_notification",
+      "arguments": {
+        "webhook_url": "'"$WEBHOOK_URL"'",
+        "message": "This is a rich text test message from AgentCore Gateway",
+        "msg_type": "post",
+        "title": "🔔 Test Notification"
+      }
+    }
+  }'
+```
+
+### Common Testing Issues
+
+| Issue | Possible Cause | Solution |
+|-------|----------------|----------|
+| `Invalid Bearer token` | Token expired or misconfigured | Re-obtain token, check AllowedClients config |
+| `Access Denied` | Incorrect scope | Ensure correct scope when requesting token |
+| `NETWORK_ERROR` | Lambda cannot access public internet | Check VPC config or NAT Gateway |
+| `VALIDATION_ERROR` | Invalid parameter format | Check webhook_url and message parameters |
+
 ## Cleanup Resources
 
 ```bash
