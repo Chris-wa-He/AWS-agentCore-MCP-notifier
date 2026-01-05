@@ -293,6 +293,148 @@ uv run ruff check src/
 - 退避策略：指数退避（1s → 2s → 4s）
 - 超时配置：连接 5s，读取 10s
 
+## 手工测试 (10 分钟)
+
+部署完成后，按照以下步骤验证 Gateway 是否正常工作。
+
+### Step 1: 获取部署输出
+
+部署成功后，从 CloudFormation 输出中获取以下信息：
+
+```bash
+# 查看 Stack 输出
+aws cloudformation describe-stacks \
+  --stack-name agentcore-feishu-notifier \
+  --query 'Stacks[0].Outputs' \
+  --output table
+```
+
+记录以下值：
+- `GatewayUrl` - Gateway MCP 端点
+- `CognitoClientId` - OAuth Client ID
+- `CognitoTokenEndpoint` - Token 端点
+
+### Step 2: 获取 Cognito Client Secret
+
+在 AWS Console 中获取 Client Secret：
+1. 进入 Cognito → User Pools
+2. 选择 `feishu-notifier-gateway-user-pool-dev`
+3. App Integration → App clients
+4. 点击 Client → 显示 Client Secret
+
+### Step 3: 获取 Access Token
+
+在终端运行（替换实际值）：
+
+```bash
+# 设置变量
+CLIENT_ID="your-client-id"
+CLIENT_SECRET="your-client-secret"
+TOKEN_ENDPOINT="https://feishu-notifier-gateway-123456789012-dev.auth.us-east-1.amazoncognito.com/oauth2/token"
+SCOPE="feishu-notifier-gateway-resource-server/invoke"
+
+# 获取 Token
+curl -X POST "$TOKEN_ENDPOINT" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=$CLIENT_ID" \
+  -d "client_secret=$CLIENT_SECRET" \
+  -d "scope=$SCOPE"
+```
+
+复制返回的 `access_token`。
+
+### Step 4: 测试 Gateway - 列出工具
+
+```bash
+GATEWAY_URL="https://gw-xxx.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
+ACCESS_TOKEN="your-access-token"
+
+curl -X POST "$GATEWAY_URL" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/list",
+    "params": {}
+  }'
+```
+
+预期返回包含 `send_feishu_notification` 工具。
+
+### Step 5: 测试 Gateway - 调用工具
+
+```bash
+# 替换为你的飞书 Webhook URL
+WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/your-webhook-id"
+
+curl -X POST "$GATEWAY_URL" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "tools/call",
+    "params": {
+      "name": "feishu-notifier-target___send_feishu_notification",
+      "arguments": {
+        "webhook_url": "'"$WEBHOOK_URL"'",
+        "message": "Hello from AgentCore Gateway! 🎉",
+        "msg_type": "text"
+      }
+    }
+  }'
+```
+
+预期返回：
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "success": true,
+    "data": {
+      "status": "sent",
+      "message": "Notification sent successfully"
+    }
+  }
+}
+```
+
+同时，你的飞书群组应该收到测试消息。
+
+### Step 6: 测试富文本消息（可选）
+
+```bash
+curl -X POST "$GATEWAY_URL" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "tools/call",
+    "params": {
+      "name": "feishu-notifier-target___send_feishu_notification",
+      "arguments": {
+        "webhook_url": "'"$WEBHOOK_URL"'",
+        "message": "这是一条来自 AgentCore Gateway 的富文本测试消息",
+        "msg_type": "post",
+        "title": "🔔 测试通知"
+      }
+    }
+  }'
+```
+
+### 常见测试问题排查
+
+| 问题 | 可能原因 | 解决方案 |
+|------|----------|----------|
+| `Invalid Bearer token` | Token 过期或配置错误 | 重新获取 Token，检查 AllowedClients 配置 |
+| `Access Denied` | Scope 不正确 | 确保请求 Token 时包含正确的 scope |
+| `NETWORK_ERROR` | Lambda 无法访问公网 | 检查 VPC 配置或 NAT Gateway |
+| `VALIDATION_ERROR` | 参数格式错误 | 检查 webhook_url 和 message 参数 |
+
 ## 清理资源
 
 ```bash
